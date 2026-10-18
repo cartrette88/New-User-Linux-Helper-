@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tag
+        uses: actions/checkout@v4
+
+      - name: Confirm the single-file installer matches the project files
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck install.sh uninstall.sh bin/command-helper-launch scripts/build-standalone-installer.sh command-helper-installer.sh
+          built=$(mktemp)
+          bash scripts/build-standalone-installer.sh "$built"
+          diff -u command-helper-installer.sh "$built"
+
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          sum=$(sha256sum command-helper-installer.sh | awk '{print $1}')
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${tag}/command-helper-installer.sh"
+          notes=$(mktemp)
+          cat > "$notes" <<EOF
+          Command Helper ${tag}
+
+          A local command helper for people new to Linux. The model runs on this computer. No cloud account, no API key, and no graphics card required.
+
+          Recommended: download the installer, read it, then run it.
+
+          \`\`\`bash
+          curl -fsSL -o command-helper-installer.sh ${url}
+          bash command-helper-installer.sh
+          \`\`\`
+
+          One-line install, only if you already trust this project:
+
+          \`\`\`bash
+          curl -fsSL ${url} | bash
+          \`\`\`
+
+          The installer does not use sudo. It installs into your user account.
+
+          Installer SHA256: ${sum}
+          EOF
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" command-helper-installer.sh --clobber
+            gh release edit "$tag" --title "Command Helper ${tag}" --notes-file "$notes"
+          else
+            gh release create "$tag" command-helper-installer.sh \
+              --title "Command Helper ${tag}" \
+              --notes-file "$notes"
+          fi

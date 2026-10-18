@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Command Helper
+GenericName=Linux command helper
+Comment=Type what you want in plain English and get a Linux command (local, offline)
+# Exec and TryExec are filled in by the installer.
+Exec=@EXEC@
+TryExec=@EXEC@
+Icon=utilities-terminal
+Terminal=false
+Categories=Utility;
+Keywords=command;terminal;help;linux;
+StartupNotify=true
