@@ -1,0 +1,69 @@
+name: Attach individual files to v1.0.0
+
+on:
+  push:
+    branches:
+      - cursor/release-individual-files-8406
+
+permissions:
+  contents: write
+
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the branch
+        uses: actions/checkout@v4
+
+      - name: Upload the individual files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          stage=$(mktemp -d)
+          cp install.sh "${stage}/install.sh"
+          cp uninstall.sh "${stage}/uninstall.sh"
+          cp bin/ask "${stage}/ask"
+          cp bin/command-helper-launch "${stage}/command-helper-launch"
+          cp share/command-helper.desktop "${stage}/command-helper.desktop"
+          gh release upload v1.0.0 \
+            "${stage}/install.sh" \
+            "${stage}/uninstall.sh" \
+            "${stage}/ask" \
+            "${stage}/command-helper-launch" \
+            "${stage}/command-helper.desktop" \
+            --clobber
+          sum=$(sha256sum command-helper-installer.sh | awk '{print $1}')
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/v1.0.0/command-helper-installer.sh"
+          notes=$(mktemp)
+          cat > "$notes" <<EOF
+          Command Helper v1.0.0
+
+          A local command helper for people new to Linux. The model runs on this computer. No cloud account, no API key, and no graphics card required.
+
+          Recommended: download the installer, read it, then run it.
+
+          \`\`\`bash
+          curl -fsSL -o command-helper-installer.sh ${url}
+          bash command-helper-installer.sh
+          \`\`\`
+
+          One-line install, only if you already trust this project:
+
+          \`\`\`bash
+          curl -fsSL ${url} | bash
+          \`\`\`
+
+          The installer does not use sudo. It installs into your user account.
+
+          Installer SHA256: ${sum}
+
+          Individual files are attached too. To install from those instead of the single file, save them in this layout and run bash install.sh:
+
+          - install.sh
+          - uninstall.sh
+          - bin/ask (asset name: ask)
+          - bin/command-helper-launch (asset name: command-helper-launch)
+          - share/command-helper.desktop (asset name: command-helper.desktop)
+          EOF
+          gh release edit v1.0.0 --title "Command Helper v1.0.0" --notes-file "$notes"
