@@ -55,12 +55,35 @@ jobs:
           The installer does not use sudo. It installs into your user account.
 
           Installer SHA256: ${sum}
+
+          Individual files are attached too. To install from those instead of the single file, save them in this layout and run bash install.sh:
+
+          - install.sh
+          - uninstall.sh
+          - bin/ask (asset name: ask)
+          - bin/command-helper-launch (asset name: command-helper-launch)
+          - share/command-helper.desktop (asset name: command-helper.desktop)
           EOF
+          stage=$(mktemp -d)
+          cp command-helper-installer.sh "${stage}/command-helper-installer.sh"
+          cp install.sh "${stage}/install.sh"
+          cp uninstall.sh "${stage}/uninstall.sh"
+          cp bin/ask "${stage}/ask"
+          cp bin/command-helper-launch "${stage}/command-helper-launch"
+          cp share/command-helper.desktop "${stage}/command-helper.desktop"
+          assets=(
+            "${stage}/command-helper-installer.sh"
+            "${stage}/install.sh"
+            "${stage}/uninstall.sh"
+            "${stage}/ask"
+            "${stage}/command-helper-launch"
+            "${stage}/command-helper.desktop"
+          )
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" command-helper-installer.sh --clobber
+            gh release upload "$tag" "${assets[@]}" --clobber
             gh release edit "$tag" --title "Command Helper ${tag}" --notes-file "$notes"
           else
-            gh release create "$tag" command-helper-installer.sh \
+            gh release create "$tag" "${assets[@]}" \
               --title "Command Helper ${tag}" \
               --notes-file "$notes"
           fi
