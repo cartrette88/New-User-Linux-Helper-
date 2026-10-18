@@ -1,0 +1,57 @@
+# Pushing a tag such as v1.0.0 creates a GitHub Release and attaches
+# command-helper-installer.sh as the single downloadable installer.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require a version tag
+        run: |
+          if ! [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            printf 'Use a tag like v1.0.0 (got %s).\n' "$GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Check the scripts and the generated installer
+        run: |
+          shellcheck scripts/common.sh scripts/build-installer.sh install.sh uninstall.sh command-helper-installer.sh bin/command-helper-launch
+          python3 -m py_compile bin/ask
+          python3 tests/test_risks.py
+          bash tests/test_installer.sh
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes=$(mktemp)
+          {
+            printf '## Command Helper %s\n\n' "$GITHUB_REF_NAME"
+            printf 'One-file install for the current user. The installer does not use sudo.\n\n'
+            printf 'Read the script, then run it:\n\n'
+            printf '```bash\n'
+            printf 'curl -fsSL -o command-helper-installer.sh \\\n'
+            printf '  https://github.com/cartrette88/New-User-Linux-Helper-/releases/download/%s/command-helper-installer.sh\n' "$GITHUB_REF_NAME"
+            printf 'bash command-helper-installer.sh\n'
+            printf '```\n\n'
+            printf 'The script downloads the pinned llama.cpp CPU build and the pinned Qwen3 model, checks their SHA256 checksums, and installs Command Helper under ~/.local.\n\n'
+            printf 'Full instructions are in the README on the main branch.\n'
+          } > "$notes"
+          gh release create "$GITHUB_REF_NAME" \
+            --title "Command Helper ${GITHUB_REF_NAME}" \
+            --notes-file "$notes" \
+            command-helper-installer.sh

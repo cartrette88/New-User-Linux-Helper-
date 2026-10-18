@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+"""ask - plain-English to Linux command helper (local, offline).
+
+Usage:
+  ask <what you want to do>     one request
+  ask                           interactive loop (type 'quit' to leave)
+  ask --print <request>         only show the suggestion, never offer to run it
+  ask --version                 print the version
+
+Runs Qwen3-4B-Instruct locally through llama.cpp (llama-server on
+127.0.0.1 only). Nothing leaves this computer. Nothing you type is saved.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+
+VERSION = "1.0.0"
+
+HOME = os.path.expanduser("~")
+LLAMA_DIR = os.environ.get(
+    "COMMAND_HELPER_LLAMA_DIR",
+    os.path.join(HOME, ".local/opt/llama.cpp/llama-b11716"),
+)
+MODEL = os.environ.get(
+    "COMMAND_HELPER_MODEL",
+    os.path.join(
+        HOME,
+        ".local/share/command-helper/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+    ),
+)
+STATE_DIR = os.path.join(HOME, ".local/state/command-helper")
+HOST, PORT = "127.0.0.1", 8742
+BASE = f"http://{HOST}:{PORT}"
+
+SYSTEM_PROMPT = (
+    "You are a Linux command helper. Reply with one bash command "
+    "(or a short && chain) and a one-line plain-English explanation. No chit-chat.\n"
+    "Use exactly this format and nothing else:\n"
+    "COMMAND: <the command on one line>\n"
+    "EXPLANATION: <one short plain-English sentence>"
+)
+
+TTY = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+
+
+def c(code, s):
+    return f"\033[{code}m{s}\033[0m" if TTY else s
+
+
+RED_BOLD = lambda s: c("1;37;41", s)
+RED = lambda s: c("1;31", s)
+GREEN = lambda s: c("1;32", s)
+CYAN = lambda s: c("1;36", s)
+DIM = lambda s: c("2", s)
+
+# A match asks the user to type yes. This is a guardrail, not proof a command is safe.
+DANGER = [
+    (r"(^|[\s;&|(`$])sudo\b", "uses sudo (runs as administrator/root)"),
+    (r"(^|[\s;&|(`$])(su|doas|pkexec)\b", "switches to another user / root"),
+    (r"(^|[\s;&|(`$])rm\b", "deletes files (rm) - there is no recycle bin"),
+    (r"(^|[\s;&|(`$])rmdir\b", "deletes folders"),
+    (r"(^|[\s;&|(`$])dd\b", "dd writes raw data and can wipe disks"),
+    (r"(^|[\s;&|(`$])mkfs(\.\w+)?\b", "formats a disk/partition (erases it)"),
+    (r"(^|[\s;&|(`$])(fdisk|sfdisk|cfdisk|gdisk|sgdisk|parted|gparted|wipefs|mkswap|cryptsetup|lvremove|vgremove|pvremove|mdadm)\b",
+     "disk partition / encryption tool"),
+    (r"(^|[\s;&|(`$])shred\b", "permanently destroys file contents"),
+    (r"(^|[\s;&|(`$])truncate\b", "can empty files"),
+    (r"(^|[\s;&|(`$])chmod\b[^;&|]*\s-[a-zA-Z]*R", "changes permissions recursively (chmod -R)"),
+    (r"(^|[\s;&|(`$])chown\b", "changes file ownership (chown)"),
+    (r"(^|[\s;&|(`$])systemctl\b", "controls system services (systemctl)"),
+    (r"(^|[\s;&|(`$])(apt|apt-get|dpkg|snap)\b[^;&|]*\b(remove|purge|autoremove|-r|-P)\b", "removes software"),
+    (r"(^|[\s;&|(`$])(dnf|yum|zypper)\b[^;&|]*\b(remove|erase)\b", "removes software"),
+    (r"(^|[\s;&|(`$])pacman\b[^;&|]*\s-[A-Za-z]*R", "removes software (pacman)"),
+    (r"(^|[\s;&|(`$])(shutdown|reboot|poweroff|halt)\b", "shuts down / restarts the computer"),
+    (r"(^|[\s;&|(`$])(kill|pkill|killall)\b", "stops running programs"),
+    (r"(^|[\s;&|(`$])mv\b", "moves/renames files (can overwrite)"),
+    (r"(^|[\s;&|(`$])crontab\b[^;&|]*\s-r", "deletes scheduled tasks"),
+    (r"(curl|wget)\b[^|]*\|\s*(sudo\s+)?(ba|z|da)?sh\b", "downloads and runs a script from the internet"),
+    (r":\(\)\s*\{", "fork bomb"),
+    (r"(^|[\s;&|(`$])tee\b", "writes into files (tee)"),
+]
+
+
+def risks(cmd):
+    found = [why for pat, why in DANGER if re.search(pat, cmd)]
+    # any output redirection (> or >>) other than harmless stderr/null forms
+    stripped = re.sub(r"\d?>&\d|&?>\s*/dev/null|\d>\s*/dev/null", "", cmd)
+    if ">" in re.sub(r"'[^']*'|\"[^\"]*\"", "", stripped):
+        found.append("writes/overwrites a file with > or >>")
+    return found
+
+
+def wants_cuda():
+    """True only when the user opts in. The default is the CPU."""
+    choice = os.environ.get("COMMAND_HELPER_BACKEND", "").strip().lower()
+    if not choice:
+        path = os.path.join(HOME, ".config", "command-helper", "backend")
+        try:
+            with open(path, encoding="utf-8") as handle:
+                text = handle.read().strip().lower()
+        except OSError:
+            text = ""
+        if text:
+            choice = text.splitlines()[0].strip()
+    if not choice:
+        return False
+    return choice.split()[0] == "cuda"
+
+
+def server_argv(exe, use_cuda):
+    argv = [
+        exe, "-m", MODEL, "--host", HOST, "--port", str(PORT),
+        "-c", "4096", "-np", "1", "-t", "8",
+    ]
+    if use_cuda:
+        argv.extend(["-ngl", "99"])
+    else:
+        argv.extend(["--device", "none", "-ngl", "0"])
+    argv.extend(["--reasoning", "off", "--sleep-idle-seconds", "900", "--no-webui"])
+    return argv
+
+
+def server_env(base, use_cuda):
+    env = dict(base)
+    # CPU only by default: hide GPUs so llama.cpp does not try to use one.
+    # Opt in to NVIDIA CUDA by writing "cuda" in ~/.config/command-helper/backend.
+    env["LD_LIBRARY_PATH"] = LLAMA_DIR + ":" + env.get("LD_LIBRARY_PATH", "")
+    env["HIP_VISIBLE_DEVICES"] = "-1"
+    env["ROCR_VISIBLE_DEVICES"] = "-1"
+    if not use_cuda:
+        env["CUDA_VISIBLE_DEVICES"] = ""
+    return env
+
+
+def server_ok():
+    try:
+        with urllib.request.urlopen(BASE + "/health", timeout=2) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+
+def start_server():
+    if server_ok():
+        return True
+    exe = os.path.join(LLAMA_DIR, "llama-server")
+    if not (os.path.exists(exe) and os.path.exists(MODEL)):
+        print(RED("Command helper model or llama.cpp not found. Expected:\n  " + exe + "\n  " + MODEL))
+        return False
+    os.makedirs(STATE_DIR, exist_ok=True)
+    use_cuda = wants_cuda()
+    env = server_env(os.environ, use_cuda)
+    argv = server_argv(exe, use_cuda)
+    log_path = os.path.join(STATE_DIR, "llama-server.log")
+    log = open(log_path, "ab")
+    try:
+        subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+            env=env,
+            start_new_session=True,
+        )
+    finally:
+        log.close()
+    if use_cuda:
+        sys.stderr.write(DIM("(using the NVIDIA CUDA opt-in)\n"))
+    sys.stderr.write(DIM("(starting the local model, first time takes a few seconds...)\n"))
+    for _ in range(240):
+        if server_ok():
+            return True
+        time.sleep(0.25)
+    print(RED("The local model did not start. See " + log_path))
+    return False
+
+
+def ask_model(request):
+    body = json.dumps({
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": request},
+        ],
+        "temperature": 0.1,
+        "max_tokens": 200,
+        "stream": False,
+    }).encode()
+    req = urllib.request.Request(
+        BASE + "/v1/chat/completions",
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=180) as response:
+        out = json.load(response)
+    return out["choices"][0]["message"].get("content") or ""
+
+
+def parse(text):
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S).replace("<think>", "").strip()
+    cmd = expl = ""
+    match = re.search(r"COMMAND:\s*(.+)", text)
+    if match:
+        cmd = match.group(1).strip()
+    match = re.search(r"EXPLANATION:\s*(.+)", text)
+    if match:
+        expl = match.group(1).strip()
+    if not cmd:
+        match = re.search(r"```(?:bash|sh)?\s*\n?(.+?)\n?```", text, re.S)
+        if match:
+            cmd = match.group(1).strip().splitlines()[0]
+    if not cmd and text:
+        cmd = text.splitlines()[0]
+    cmd = cmd.strip().strip("`").strip()
+    if cmd.startswith("$ "):
+        cmd = cmd[2:]
+    return cmd, expl
+
+
+def handle(request, allow_run=True):
+    if not start_server():
+        return
+    started = time.time()
+    try:
+        cmd, expl = parse(ask_model(request))
+    except Exception as exc:
+        print(RED(f"Could not get an answer from the local model: {exc}"))
+        return
+    elapsed = time.time() - started
+    if not cmd:
+        print(RED("No command came back. Try rephrasing."))
+        return
+    print()
+    print(CYAN("Command:     ") + cmd)
+    print(CYAN("Explanation: ") + (expl or "(none given)"))
+    print(DIM(f"({elapsed:.1f}s)"))
+    if not allow_run:
+        return
+    danger = risks(cmd)
+    try:
+        if danger:
+            print()
+            print(RED_BOLD(" WARNING: this command can change or delete things, or needs root "))
+            for why in danger:
+                print(RED("  - " + why))
+            print(RED("Read it carefully. If you are not sure, do NOT run it."))
+            ans = input(RED("Type 'yes' in full to run it, anything else cancels: ")).strip()
+            ok = ans == "yes"
+        else:
+            ans = input("Run it? [y/N] ").strip().lower()
+            ok = ans in ("y", "yes")
+    except EOFError:
+        ok = False
+        print()
+    if not ok:
+        print(DIM("Not run."))
+        return
+    print(DIM("-" * 60))
+    # Runs in your normal terminal; if the command uses sudo, sudo asks for your
+    # password itself. This program never sees or stores it.
+    sys.stdout.flush()
+    rc = subprocess.call(["bash", "-c", cmd])
+    print(DIM("-" * 60))
+    print(GREEN("Done.") if rc == 0 else RED(f"Finished with exit code {rc}."))
+
+
+def loop():
+    try:
+        import readline  # arrow keys/editing; history is kept in memory only
+    except Exception:
+        pass
+    print(GREEN("Command Helper") + " - describe what you want to do in plain English.")
+    print(DIM("Type 'quit' (or press Ctrl+D) to leave. Nothing you type is saved."))
+    while True:
+        try:
+            req = input("\n" + CYAN("ask> ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not req:
+            continue
+        if req.lower() in ("quit", "exit", "q", "bye"):
+            break
+        try:
+            handle(req)
+        except KeyboardInterrupt:
+            print(DIM("\n(cancelled)"))
+
+
+def main():
+    args = sys.argv[1:]
+    if args and args[0] in ("-h", "--help"):
+        print(__doc__.strip())
+        return
+    if args and args[0] in ("-V", "--version"):
+        print(VERSION)
+        return
+    allow_run = True
+    if args and args[0] in ("-p", "--print"):
+        allow_run = False
+        args = args[1:]
+    if args:
+        try:
+            handle(" ".join(args), allow_run)
+        except KeyboardInterrupt:
+            print(DIM("\n(cancelled)"))
+    else:
+        loop()
+
+
+if __name__ == "__main__":
+    main()

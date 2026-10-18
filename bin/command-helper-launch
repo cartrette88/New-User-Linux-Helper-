@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Opens a terminal window running the Command Helper (ask) loop.
+set -euo pipefail
+
+# $HOME is expanded by the terminal's bash, not by this launcher.
+# shellcheck disable=SC2016
+CMD=(bash -c 'export PATH="$HOME/.local/bin:$PATH"; "$HOME/.local/bin/ask"; echo; read -rp "Press Enter to close this window..." _')
+
+if command -v ptyxis >/dev/null 2>&1; then
+  exec ptyxis -- "${CMD[@]}"
+elif command -v gnome-terminal >/dev/null 2>&1; then
+  exec gnome-terminal --title "Command Helper" -- "${CMD[@]}"
+elif command -v konsole >/dev/null 2>&1; then
+  exec konsole --separate --title "Command Helper" -e "${CMD[@]}"
+elif command -v x-terminal-emulator >/dev/null 2>&1; then
+  exec x-terminal-emulator -e "${CMD[@]}"
+elif command -v xterm >/dev/null 2>&1; then
+  exec xterm -T "Command Helper" -e "${CMD[@]}"
+else
+  printf 'No terminal program found. Open a terminal and run: ask\n' >&2
+  exit 1
+fi

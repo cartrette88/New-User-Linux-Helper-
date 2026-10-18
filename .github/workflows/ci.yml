@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Shell syntax and shellcheck
+        run: |
+          shellcheck scripts/common.sh scripts/build-installer.sh install.sh uninstall.sh command-helper-installer.sh bin/command-helper-launch
+
+      - name: Python syntax and unit tests
+        run: |
+          python3 -m py_compile bin/ask
+          python3 tests/test_risks.py
+
+      - name: Installer tests
+        run: bash tests/test_installer.sh
+
+      - name: Reject personal or machine-specific strings
+        run: |
+          python3 - << 'PY'
+          import pathlib, re, sys
+          pattern = re.compile("ani" "me" + "|" + "68" "00" + "|" + "50" "80" + "|" + "/hom" + "e/")
+          bad = []
+          for path in pathlib.Path(".").rglob("*"):
+              if not path.is_file() or ".git" in path.parts:
+                  continue
+              data = path.read_bytes()
+              if b"\0" in data:
+                  continue
+              if pattern.search(data.decode("utf-8", "ignore")):
+                  bad.append(str(path))
+          if bad:
+              print("Found personal or machine-specific strings in:")
+              print("\n".join(bad))
+              sys.exit(1)
+          PY
