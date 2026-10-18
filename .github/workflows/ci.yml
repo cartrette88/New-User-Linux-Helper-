@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Shellcheck
+        run: |
+          set -euo pipefail
+          shellcheck install.sh uninstall.sh bin/command-helper-launch scripts/build-standalone-installer.sh
+          shellcheck -x tests/test_install_layout.sh tests/test_preflight.sh
+
+      - name: Python syntax and danger-detector tests
+        run: |
+          set -euo pipefail
+          python3 -m py_compile bin/ask tests/test_risks.py
+          python3 -m unittest discover -s tests -v
+
+      - name: Installer layout and preflight
+        run: |
+          set -euo pipefail
+          bash tests/test_install_layout.sh
+          bash tests/test_preflight.sh
+
+      - name: Single-file installer matches the project files
+        run: |
+          set -euo pipefail
+          built=$(mktemp)
+          bash scripts/build-standalone-installer.sh "$built"
+          diff -u command-helper-installer.sh "$built"
+          shellcheck command-helper-installer.sh
+          bash command-helper-installer.sh --help >/dev/null
+          bash command-helper-installer.sh --check >/dev/null
+
+      - name: Pinned versions stay in sync
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib, re
+          root = pathlib.Path(".")
+          install = (root / "install.sh").read_text(encoding="utf-8")
+          uninstall = (root / "uninstall.sh").read_text(encoding="utf-8")
+          ask = (root / "bin" / "ask").read_text(encoding="utf-8")
+          readme = (root / "README.md").read_text(encoding="utf-8")
+
+          def pin(name: str) -> str:
+              match = re.search(rf'^{name}="([^"]+)"', install, re.M)
+              if not match:
+                  raise SystemExit(f"missing {name}")
+              return match.group(1)
+
+          version = pin("LLAMA_VERSION")
+          model = pin("MODEL_FILE")
+          if f"llama-{version}" not in ask:
+              raise SystemExit("ask does not use the pinned llama.cpp folder")
+          if model not in ask:
+              raise SystemExit("ask does not use the pinned model file")
+          if pin("LLAMA_VERSION") not in uninstall:
+              raise SystemExit("uninstall.sh does not name the pinned llama.cpp folder")
+          begin = "# BEGIN command-helper PATH (added by the installer)"
+          end = "# END command-helper PATH"
+          for label, text in (("install.sh", install), ("uninstall.sh", uninstall)):
+              if begin not in text or end not in text:
+                  raise SystemExit(f"{label} is missing the PATH markers")
+          for name in ("SHA_CPU_X64", "SHA_CPU_ARM64", "SHA_CUDA_X64", "SHA_CUDART_X64", "MODEL_SHA256"):
+              value = pin(name)
+              if value not in readme:
+                  raise SystemExit(f"README is missing {name}")
+          if "1.0.0" not in ask or pin("VERSION") != "1.0.0":
+              raise SystemExit("version strings do not match")
+          PY
+
+      - name: No personal or machine-specific paths
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib
+          needles = (
+              "".join(chr(c) for c in (97, 110, 105, 109, 101)),
+              "".join(chr(c) for c in (47, 104, 111, 109, 101, 47)),
+              "".join(chr(c) for c in (54, 56, 48, 48)),
+              "".join(chr(c) for c in (53, 48, 56, 48)),
+          )
+          root = pathlib.Path(".")
+          for path in root.rglob("*"):
+              if not path.is_file() or ".git" in path.parts or "__pycache__" in path.parts:
+                  continue
+              text = path.read_bytes()
+              for needle in needles:
+                  if needle.encode() in text:
+                      raise SystemExit(f"{path} contains {needle}")
+          print("personal-path scan clean")
+          PY

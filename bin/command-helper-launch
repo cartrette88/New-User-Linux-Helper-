@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Open a terminal window running the Command Helper prompt.
+if [ -z "${BASH_VERSION:-}" ]; then
+  echo "Please run this with bash." >&2
+  exit 1
+fi
+set -euo pipefail
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+fail() {
+  local msg=$1
+  printf '%s\n' "$msg" >&2
+  if have notify-send; then
+    notify-send "Command Helper" "$msg" || true
+  elif have zenity; then
+    zenity --error --text="$msg" || true
+  fi
+  exit 1
+}
+
+if [[ ! -x ${HOME}/.local/bin/ask ]]; then
+  fail "Command Helper is not installed yet. Run the installer, then try this again."
+fi
+
+inner=$(cat <<'EOF'
+export PATH="$HOME/.local/bin:$PATH"
+"$HOME/.local/bin/ask"
+echo
+read -r -p "Press Enter to close this window..." _
+EOF
+)
+
+if have ptyxis; then
+  exec ptyxis -- bash -c "$inner"
+elif have gnome-terminal; then
+  exec gnome-terminal --title "Command Helper" -- bash -c "$inner"
+elif have kgx; then
+  exec kgx -- bash -c "$inner"
+elif have konsole; then
+  exec konsole --title "Command Helper" -e bash -c "$inner"
+elif have xfce4-terminal; then
+  exec xfce4-terminal --title "Command Helper" --command "bash -c $(printf '%q' "$inner")"
+elif have mate-terminal; then
+  exec mate-terminal --title "Command Helper" -- bash -c "$inner"
+elif have tilix; then
+  exec tilix --title "Command Helper" -e bash -c "$inner"
+elif have kitty; then
+  exec kitty --title "Command Helper" bash -c "$inner"
+elif have alacritty; then
+  exec alacritty --title "Command Helper" -e bash -c "$inner"
+elif have foot; then
+  exec foot bash -c "$inner"
+elif have x-terminal-emulator; then
+  exec x-terminal-emulator -e bash -c "$inner"
+elif have xterm; then
+  exec xterm -T "Command Helper" -e bash -c "$inner"
+fi
+
+fail "Could not find a terminal program. Open a terminal yourself and type: ask"
