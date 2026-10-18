@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Command Helper
+GenericName=Plain-English command helper
+Comment=Type what you want in plain English and get a Linux command (local AI, offline)
+# The installer replaces Exec and TryExec with the path on this computer.
+Exec=command-helper-launch
+TryExec=command-helper-launch
+Icon=utilities-terminal
+Terminal=false
+Categories=Utility;
+Keywords=terminal;command;help;
+StartupNotify=true
